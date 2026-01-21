@@ -2,12 +2,10 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import datetime
-from duckduckgo_search import DDGS
-from geopy.geocoders import Nominatim
 
 # --- 1. データベース設定 ---
 def init_db():
-    conn = sqlite3.connect('todo_app_v2.db', check_same_thread=False)
+    conn = sqlite3.connect('todo_app_simple.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS categories 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, type TEXT, color TEXT)''')
@@ -57,38 +55,9 @@ def delete_item(item_id):
     c.execute("DELETE FROM items WHERE id = ?", (item_id,))
     conn.commit()
 
-# --- 🔍 自動検索ロジック (ここが新機能) ---
-def search_place_info(query):
-    """地名からURLと緯度経度を検索する"""
-    url = None
-    lat = None
-    lon = None
-
-    # 1. URL検索 (DuckDuckGo)
-    try:
-        with DDGS() as ddgs:
-            # 日本語優先で検索し、最初の結果を取得
-            results = list(ddgs.text(f"{query} 公式", region='jp-jp', max_results=1))
-            if results:
-                url = results[0]['href']
-    except Exception as e:
-        print(f"Search Error: {e}")
-
-    # 2. 緯度経度検索 (Nominatim / OpenStreetMap)
-    try:
-        geolocator = Nominatim(user_agent="streamlit_todo_app")
-        location = geolocator.geocode(query)
-        if location:
-            lat = location.latitude
-            lon = location.longitude
-    except Exception as e:
-        print(f"Geo Error: {e}")
-
-    return url, lat, lon
-
 # --- UI設定 ---
-st.set_page_config(page_title="自動検索To-Do", layout="wide")
-st.title("🤖 自動検索付き 行き先マップ")
+st.set_page_config(page_title="To-Do & Map", layout="wide")
+st.title("🗺️ 行き先マップ付き To-Do (シンプル版)")
 
 # サイドバー
 with st.sidebar:
@@ -137,7 +106,7 @@ if not categories.empty:
                             update_item_status(item['id'], chk)
                             st.rerun()
 
-                # B. マップ＆リンク（自動検索付き）
+                # B. マップ＆リンク（手動入力版）
                 elif cat['type'] == 'maplist':
                     # 地図表示
                     map_data = items.dropna(subset=['lat', 'lon'])
@@ -149,45 +118,24 @@ if not categories.empty:
                         with st.expander(f"📍 {item['name']}"):
                             if item['url']:
                                 st.link_button(f"🔗 公式サイト: {item['url']}", item['url'])
-                            else:
-                                st.caption("URLなし")
                             
                             if st.button("削除", key=f"del_i_{item['id']}"):
                                 delete_item(item['id'])
                                 st.rerun()
 
-                    # 追加フォーム
+                    # 追加フォーム（手動入力）
                     st.markdown("---")
-                    st.caption("👇 名前だけ入力して「自動検索＆登録」を押すと、URLと地図を自動取得します")
-                    
                     with st.form(f"add_map_{cat['id']}", clear_on_submit=True):
-                        i_name = st.text_input("行き先の名前 (例: 清水寺, USJ)")
+                        st.caption("行き先の登録")
+                        i_name = st.text_input("名前 (例: 清水寺)")
                         i_date = st.date_input("予定日", datetime.date.today())
+                        i_url = st.text_input("URL (任意)")
                         
-                        # 手動入力欄（アコーディオンで隠す）
-                        with st.expander("手動でURLや座標を入れる場合は開く"):
-                            i_url = st.text_input("URL (任意)")
-                            c_lat, c_lon = st.columns(2)
-                            i_lat = c_lat.number_input("緯度", value=None, format="%.6f")
-                            i_lon = c_lon.number_input("経度", value=None, format="%.6f")
+                        c_lat, c_lon = st.columns(2)
+                        i_lat = c_lat.number_input("緯度 (Googleマップで右クリック)", value=None, format="%.6f")
+                        i_lon = c_lon.number_input("経度", value=None, format="%.6f")
 
-                        if st.form_submit_button("✨ 自動検索＆登録"):
+                        if st.form_submit_button("登録"):
                             if i_name:
-                                # 手動入力がない場合は検索を実行
-                                final_url = i_url
-                                final_lat = i_lat
-                                final_lon = i_lon
-
-                                # 検索実行の判定
-                                needs_search = (not final_url) or (final_lat is None)
-                                
-                                if needs_search:
-                                    with st.spinner(f"🔍 '{i_name}' を検索中..."):
-                                        s_url, s_lat, s_lon = search_place_info(i_name)
-                                        # 空欄箇所のみ検索結果で埋める
-                                        if not final_url: final_url = s_url
-                                        if final_lat is None: final_lat = s_lat
-                                        if final_lon is None: final_lon = s_lon
-                                
-                                add_item(cat['id'], i_name, final_url, i_date, final_lat, final_lon)
+                                add_item(cat['id'], i_name, i_url, i_date, i_lat, i_lon)
                                 st.rerun()
