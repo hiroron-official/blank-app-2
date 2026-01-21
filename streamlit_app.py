@@ -3,12 +3,16 @@ import pandas as pd
 import sqlite3
 import datetime
 
-# --- 1. データベース設定 ---
+# --- 1. データベース設定 (SQLite) ---
 def init_db():
-    conn = sqlite3.connect('todo_app_simple.db', check_same_thread=False)
+    conn = sqlite3.connect('todo_app.db', check_same_thread=False)
     c = conn.cursor()
+    
+    # カテゴリ管理テーブル
     c.execute('''CREATE TABLE IF NOT EXISTS categories 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, type TEXT, color TEXT)''')
+    
+    # アイテム管理テーブル（日付、緯度経度カラムを追加）
     c.execute('''CREATE TABLE IF NOT EXISTS items 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, 
                   name TEXT, is_done INTEGER, url TEXT, 
@@ -18,7 +22,7 @@ def init_db():
 
 conn = init_db()
 
-# --- DB操作関数 ---
+# --- DB操作関数群 ---
 def get_categories():
     return pd.read_sql("SELECT * FROM categories", conn)
 
@@ -29,7 +33,7 @@ def add_category(name, type, color):
 
 def delete_category(cat_id):
     c = conn.cursor()
-    c.execute("DELETE FROM items WHERE category_id = ?", (cat_id,))
+    c.execute("DELETE FROM items WHERE category_id = ?", (cat_id,)) # 紐づくアイテムも削除
     c.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
     conn.commit()
 
@@ -38,6 +42,7 @@ def get_items(cat_id):
 
 def add_item(cat_id, name, url=None, target_date=None, lat=None, lon=None):
     c = conn.cursor()
+    # 日付オブジェクトを文字列に変換
     date_str = target_date.strftime('%Y-%m-%d') if target_date else None
     c.execute('''INSERT INTO items (category_id, name, is_done, url, target_date, lat, lon) 
                  VALUES (?, ?, 0, ?, ?, ?, ?)''', 
@@ -55,87 +60,113 @@ def delete_item(item_id):
     c.execute("DELETE FROM items WHERE id = ?", (item_id,))
     conn.commit()
 
-# --- UI設定 ---
-st.set_page_config(page_title="To-Do & Map", layout="wide")
-st.title("🗺️ 行き先マップ付き To-Do (シンプル版)")
+# --- ページ設定 ---
+st.set_page_config(page_title="高機能To-Do & Map", layout="wide")
+st.title("🗺️ 行き先マップ付き To-Do アプリ")
 
-# サイドバー
+# --- サイドバー：カテゴリ追加 ---
 with st.sidebar:
     st.header("カテゴリ作成")
     with st.form("add_cat_form"):
-        new_name = st.text_input("カテゴリ名", placeholder="例：京都旅行")
-        new_type = st.radio("タイプ", ["チェックリスト", "マップ＆リンク"])
-        color_options = {"🟡 黄": "#fff9c4", "🟢 緑": "#e8f5e9", "🔵 青": "#e3f2fd", "🔴 赤": "#ffcdd2"}
-        selected_color_label = st.selectbox("色", list(color_options.keys()))
+        new_name = st.text_input("カテゴリ名", placeholder="例：北海道旅行")
+        new_type = st.radio("タイプ", ["チェックリスト (買い物等)", "マップ＆リンク (旅行等)"])
+        
+        # 色選択
+        color_options = {
+            "🟡 黄 (買い物)": "#fff9c4", 
+            "🟢 緑 (旅行/自然)": "#e8f5e9", 
+            "🔵 青 (仕事/勉強)": "#e3f2fd", 
+            "🔴 赤 (重要)": "#ffcdd2"
+        }
+        selected_color_label = st.selectbox("テーマカラー", list(color_options.keys()))
         
         if st.form_submit_button("追加"):
             if new_name:
-                t_code = "checklist" if "チェックリスト" in new_type else "maplist"
-                add_category(new_name, t_code, color_options[selected_color_label])
+                type_code = "checklist" if "チェックリスト" in new_type else "maplist"
+                add_category(new_name, type_code, color_options[selected_color_label])
                 st.rerun()
 
-# メイン表示
+    st.divider()
+    st.markdown("※ 緯度経度はGoogleマップ等で右クリックして取得できます")
+
+# --- メインエリア表示 ---
 categories = get_categories()
 
-if not categories.empty:
+if categories.empty:
+    st.info("👈 サイドバーからカテゴリを追加してください")
+else:
+    # 2列レイアウトでカードを表示
     cols = st.columns(2)
+    
     for index, cat in categories.iterrows():
         col = cols[index % 2]
+        
         with col:
+            # カード枠のデザイン
             with st.container(border=True):
-                # ヘッダー
-                c1, c2 = st.columns([4, 1])
-                c1.subheader(f"{'📝' if cat['type']=='checklist' else '🚗'} {cat['name']}")
-                if c2.button("🗑️", key=f"del_{cat['id']}"):
+                # ヘッダー部分
+                c_head1, c_head2 = st.columns([4, 1])
+                icon = "📝" if cat['type'] == 'checklist' else "🚗"
+                c_head1.subheader(f"{icon} {cat['name']}")
+                if c_head2.button("🗑️", key=f"del_cat_{cat['id']}"):
                     delete_category(cat['id'])
                     st.rerun()
 
+                # --- アイテム取得 ---
                 items = get_items(cat['id'])
 
-                # A. チェックリスト
+                # A. チェックリスト形式（買い物など）
                 if cat['type'] == 'checklist':
-                    with st.form(f"f_{cat['id']}", clear_on_submit=True):
-                        col_in, col_btn = st.columns([3,1])
-                        nm = col_in.text_input("項目", label_visibility="collapsed")
+                    # 追加フォーム
+                    with st.form(f"add_check_{cat['id']}", clear_on_submit=True):
+                        col_in, col_btn = st.columns([3, 1])
+                        new_item_name = col_in.text_input("項目名", label_visibility="collapsed")
                         if col_btn.form_submit_button("追加"):
-                            add_item(cat['id'], nm)
+                            add_item(cat['id'], new_item_name)
                             st.rerun()
-                    for _, item in items.iterrows():
-                        chk = st.checkbox(item['name'], value=bool(item['is_done']), key=f"c_{item['id']}")
-                        if chk != bool(item['is_done']):
-                            update_item_status(item['id'], chk)
-                            st.rerun()
+                    
+                    # リスト表示
+                    if not items.empty:
+                        for _, item in items.iterrows():
+                            checked = st.checkbox(item['name'], value=bool(item['is_done']), key=f"chk_{item['id']}")
+                            if checked != bool(item['is_done']):
+                                update_item_status(item['id'], checked)
+                                st.rerun()
 
-                # B. マップ＆リンク（手動入力版）
+                # B. マップ＆リンク形式（旅行・ドライブなど）
                 elif cat['type'] == 'maplist':
-                    # 地図表示
+                    # 地図データの準備
                     map_data = items.dropna(subset=['lat', 'lon'])
+                    
+                    # 1. 地図表示（データがある場合のみ）
                     if not map_data.empty:
                         st.map(map_data, latitude='lat', longitude='lon', size=20, color='#FF0000')
 
-                    # リスト表示
+                    # 2. リスト表示
                     for _, item in items.iterrows():
-                        with st.expander(f"📍 {item['name']}"):
+                        with st.expander(f"📍 {item['name']} ({item['target_date'] or '日付未定'})"):
+                            st.write(f"日付: {item['target_date']}")
                             if item['url']:
-                                st.link_button(f"🔗 公式サイト: {item['url']}", item['url'])
+                                st.link_button("公式サイトを見る", item['url'])
                             
-                            if st.button("削除", key=f"del_i_{item['id']}"):
+                            # 削除ボタン
+                            if st.button("削除", key=f"del_item_{item['id']}"):
                                 delete_item(item['id'])
                                 st.rerun()
 
-                    # 追加フォーム（手動入力）
-                    st.markdown("---")
-                    with st.form(f"add_map_{cat['id']}", clear_on_submit=True):
-                        st.caption("行き先の登録")
-                        i_name = st.text_input("名前 (例: 清水寺)")
-                        i_date = st.date_input("予定日", datetime.date.today())
-                        i_url = st.text_input("URL (任意)")
-                        
-                        c_lat, c_lon = st.columns(2)
-                        i_lat = c_lat.number_input("緯度 (Googleマップで右クリック)", value=None, format="%.6f")
-                        i_lon = c_lon.number_input("経度", value=None, format="%.6f")
-
-                        if st.form_submit_button("登録"):
-                            if i_name:
+                    # 3. 追加フォーム
+                    with st.expander("➕ 新しい行き先を追加"):
+                        with st.form(f"add_map_{cat['id']}", clear_on_submit=True):
+                            i_name = st.text_input("場所の名前 (例: 富良野ラベンダー畑)")
+                            i_date = st.date_input("予定日", datetime.date.today())
+                            i_url = st.text_input("URL (Googleマップなど)")
+                            
+                            c_lat, c_lon = st.columns(2)
+                            i_lat = c_lat.number_input("緯度 (Latitude)", value=None, format="%.6f", placeholder="例: 43.418")
+                            i_lon = c_lon.number_input("経度 (Longitude)", value=None, format="%.6f", placeholder="例: 142.427")
+                            
+                            st.caption("※緯度経度を入力すると地図にピンが立ちます")
+                            
+                            if st.form_submit_button("登録"):
                                 add_item(cat['id'], i_name, i_url, i_date, i_lat, i_lon)
                                 st.rerun()
