@@ -3,7 +3,8 @@
 StreamlitとSupabaseを使用して作成した、位置情報（マップ）も扱えるTo-Doリストアプリです。
 データベースに **Supabase** を採用しているため、アプリを再起動してもデータが消えず、クラウド上で永続的に管理できます。
 
-[![Open in Streamlit](https://blank-app-cih34ssp36.streamlit.app/)](ここにアプリのURLを貼る)
+
+https://blank-app-cih34ssp36.streamlit.app/
 
 ## ✨ 主な機能
 
