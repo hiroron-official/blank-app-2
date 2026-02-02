@@ -1,138 +1,173 @@
+
 import streamlit as st
 import pandas as pd
-from supabase import create_client, Client
-import time
+import sqlite3
+import datetime
 
-# --- 1. Supabaseへの接続設定 ---
-@st.cache_resource
-def init_connection():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
-
-supabase = init_connection()
-
-# --- 2. データベース操作関数 ---
-
-def get_data():
-    """Supabaseから全データを取得してDataFrame化"""
-    response = supabase.table("todos").select("*").order("id", desc=True).execute()
-    df = pd.DataFrame(response.data)
-    # データが空の場合の列定義（エラー回避用）
-    if df.empty:
-        df = pd.DataFrame(columns=["id", "task", "latitude", "longitude", "is_done", "created_at"])
-    return df
-
-def handle_changes():
-    """データエディタの変更内容をSupabaseに反映するコールバック関数"""
-    changes = st.session_state.editor_changes
-    # 現在の画面上のデータ（変更前の状態を知るために必要）
-    current_df = st.session_state.current_df
-
-    # 1. 削除された行の処理 (deleted_rows)
-    # changes['deleted_rows'] には削除された行のインデックス番号のリストが入っています
-    if changes["deleted_rows"]:
-        for index in changes["deleted_rows"]:
-            # 削除対象のIDを取得
-            if 0 <= index < len(current_df):
-                row_id = int(current_df.iloc[index]["id"])
-                supabase.table("todos").delete().eq("id", row_id).execute()
-                st.toast(f"ID:{row_id} を削除しました🗑️")
-
-    # 2. 追加された行の処理 (added_rows)
-    # changes['added_rows'] には {追加された行のデータ} のリストが入っています
-    if changes["added_rows"]:
-        for row in changes["added_rows"]:
-            # 必須項目が空でないか簡易チェック（空ならデフォルト値や無視など）
-            # ここでは task があれば登録するようにします
-            if "task" in row and row["task"]:
-                # latitude/longitude が入力されてなければデフォルト値を入れる等の処理も可
-                new_data = {
-                    "task": row.get("task"),
-                    "latitude": row.get("latitude", 35.6812), # デフォルト東京駅
-                    "longitude": row.get("longitude", 139.7671),
-                    "is_done": row.get("is_done", False)
-                }
-                supabase.table("todos").insert(new_data).execute()
-                st.toast("新しいタスクを追加しました✨")
-
-    # 3. 編集された行の処理 (edited_rows)
-    # changes['edited_rows'] は {インデックス: {変更された列: 新しい値}} の辞書です
-    if changes["edited_rows"]:
-        for index, updates in changes["edited_rows"].items():
-            index = int(index)
-            if 0 <= index < len(current_df):
-                row_id = int(current_df.iloc[index]["id"])
-                # Supabaseを更新
-                supabase.table("todos").update(updates).eq("id", row_id).execute()
-                st.toast(f"ID:{row_id} を更新しました✏️")
-
-# --- 3. アプリケーション UI ---
-st.set_page_config(page_title="Table Editor ToDo", layout="wide")
-st.title("⚡️ Supabase Table Editor アプリ")
-st.caption("下の表をExcelのように直接編集できます。変更は自動保存されます。")
-
-# データのロード（初回またはリロード時）
-if 'current_df' not in st.session_state:
-    st.session_state.current_df = get_data()
-
-# データを再取得ボタン（同期ズレ用）
-if st.button("🔄 最新データを読み込む"):
-    st.session_state.current_df = get_data()
-    st.rerun()
-
-# 画面レイアウト：左にテーブル、右にマップ
-col1, col2 = st.columns([3, 2])
-
-with col1:
-    st.subheader("📋 データ編集")
-    # --- データエディタの表示 ---
-    edited_df = st.data_editor(
-        st.session_state.current_df,
-        key="editor_changes",          # 変更検知用のキー
-        on_change=handle_changes,      # 変更があったら実行する関数
-        num_rows="dynamic",            # 行の追加・削除を許可
-        height=500,
-        use_container_width=True,
-        # 列ごとの設定（IDは編集不可にするなど）
-        column_config={
-            "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-            "task": st.column_config.TextColumn("タスク名", required=True),
-            "latitude": st.column_config.NumberColumn("緯度", format="%.4f"),
-            "longitude": st.column_config.NumberColumn("経度", format="%.4f"),
-            "is_done": st.column_config.CheckboxColumn("完了"),
-            "created_at": st.column_config.DatetimeColumn("作成日時", disabled=True, format="YYYY/MM/DD HH:mm"),
-        },
-        # どの列を表示するか（created_atなどは隠してもよい）
-        column_order=["is_done", "task", "latitude", "longitude", "id"]
-    )
+# --- 1. データベース設定 (SQLite) ---
+def init_db():
+    conn = sqlite3.connect('todo_app.db', check_same_thread=False)
+    c = conn.cursor()
     
-    # 処理が終わった後、session_stateのデータを最新にしてリロードしないと
-    # 「変更前のデータ」と「DB」がズレてしまうため、ここでリロード判定
-    if st.session_state.editor_changes["edited_rows"] or \
-       st.session_state.editor_changes["added_rows"] or \
-       st.session_state.editor_changes["deleted_rows"]:
-        # 少し待ってからリロード（Toastを表示させるため）
-        time.sleep(1)
-        st.session_state.current_df = get_data()
-        st.rerun()
-
-with col2:
-    st.subheader("🗺️ リアルタイムマップ")
-    # 完了していないタスクのみマップに表示
-    # データエディタで編集中（edited_df）の内容を反映
-    active_tasks = edited_df[edited_df['is_done'] == False].copy()
+    # カテゴリ管理テーブル
+    c.execute('''CREATE TABLE IF NOT EXISTS categories 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, type TEXT, color TEXT)''')
     
-    if not active_tasks.empty:
-        # map用に列名をリネーム
-        map_data = active_tasks.rename(columns={"latitude": "lat", "longitude": "lon"})
-        # 緯度経度がNaN（空）のデータを除外
-        map_data = map_data.dropna(subset=['lat', 'lon'])
-        st.map(map_data)
+    # アイテム管理テーブル（日付、緯度経度カラムを追加）
+    c.execute('''CREATE TABLE IF NOT EXISTS items 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, category_id INTEGER, 
+                  name TEXT, is_done INTEGER, url TEXT, 
+                  target_date TEXT, lat REAL, lon REAL)''')
+    conn.commit()
+    return conn
+
+conn = init_db()
+
+# --- DB操作関数群 ---
+def get_categories():
+    return pd.read_sql("SELECT * FROM categories", conn)
+
+def add_category(name, type, color):
+    c = conn.cursor()
+    c.execute("INSERT INTO categories (name, type, color) VALUES (?, ?, ?)", (name, type, color))
+    conn.commit()
+
+def delete_category(cat_id):
+    c = conn.cursor()
+    c.execute("DELETE FROM items WHERE category_id = ?", (cat_id,)) # 紐づくアイテムも削除
+    c.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+    conn.commit()
+
+def get_items(cat_id):
+    return pd.read_sql("SELECT * FROM items WHERE category_id = ?", conn, params=(cat_id,))
+
+def add_item(cat_id, name, url=None, target_date=None, lat=None, lon=None):
+    c = conn.cursor()
+    # 日付オブジェクトを文字列に変換
+    date_str = target_date.strftime('%Y-%m-%d') if target_date else None
+    c.execute('''INSERT INTO items (category_id, name, is_done, url, target_date, lat, lon) 
+                 VALUES (?, ?, 0, ?, ?, ?, ?)''', 
+              (cat_id, name, url, date_str, lat, lon))
+    conn.commit()
+
+def update_item_status(item_id, is_done):
+    c = conn.cursor()
+    val = 1 if is_done else 0
+    c.execute("UPDATE items SET is_done = ? WHERE id = ?", (val, item_id))
+    conn.commit()
+
+def delete_item(item_id):
+    c = conn.cursor()
+    c.execute("DELETE FROM items WHERE id = ?", (item_id,))
+    conn.commit()
+
+# --- ページ設定 ---
+st.set_page_config(page_title="高機能To-Do & Map", layout="wide")
+st.title("🗺️ 行き先マップ付き To-Do アプリ")
+
+# --- サイドバー：カテゴリ追加 ---
+with st.sidebar:
+    st.header("カテゴリ作成")
+    with st.form("add_cat_form"):
+        new_name = st.text_input("カテゴリ名", placeholder="例：北海道旅行")
+        new_type = st.radio("タイプ", ["チェックリスト (買い物等)", "マップ＆リンク (旅行等)"])
         
-        # タスクリスト（マップ下の補助表示）
-        st.write("**📍 マップ上のタスク:**")
-        for i, row in active_tasks.iterrows():
-            st.markdown(f"- {row['task']}")
-    else:
-        st.info("マップに表示する未完了タスクはありません。")
+        # 色選択
+        color_options = {
+            "🟡 黄 (買い物)": "#fff9c4", 
+            "🟢 緑 (旅行/自然)": "#e8f5e9", 
+            "🔵 青 (仕事/勉強)": "#e3f2fd", 
+            "🔴 赤 (重要)": "#ffcdd2"
+        }
+        selected_color_label = st.selectbox("テーマカラー", list(color_options.keys()))
+        
+        if st.form_submit_button("追加"):
+            if new_name:
+                type_code = "checklist" if "チェックリスト" in new_type else "maplist"
+                add_category(new_name, type_code, color_options[selected_color_label])
+                st.rerun()
+
+    st.divider()
+    st.markdown("※ 緯度経度はGoogleマップ等で右クリックして取得できます")
+
+# --- メインエリア表示 ---
+categories = get_categories()
+
+if categories.empty:
+    st.info("👈 サイドバーからカテゴリを追加してください")
+else:
+    # 2列レイアウトでカードを表示
+    cols = st.columns(2)
+    
+    for index, cat in categories.iterrows():
+        col = cols[index % 2]
+        
+        with col:
+            # カード枠のデザイン
+            with st.container(border=True):
+                # ヘッダー部分
+                c_head1, c_head2 = st.columns([4, 1])
+                icon = "📝" if cat['type'] == 'checklist' else "🚗"
+                c_head1.subheader(f"{icon} {cat['name']}")
+                if c_head2.button("🗑️", key=f"del_cat_{cat['id']}"):
+                    delete_category(cat['id'])
+                    st.rerun()
+
+                # --- アイテム取得 ---
+                items = get_items(cat['id'])
+
+                # A. チェックリスト形式（買い物など）
+                if cat['type'] == 'checklist':
+                    # 追加フォーム
+                    with st.form(f"add_check_{cat['id']}", clear_on_submit=True):
+                        col_in, col_btn = st.columns([3, 1])
+                        new_item_name = col_in.text_input("項目名", label_visibility="collapsed")
+                        if col_btn.form_submit_button("追加"):
+                            add_item(cat['id'], new_item_name)
+                            st.rerun()
+                    
+                    # リスト表示
+                    if not items.empty:
+                        for _, item in items.iterrows():
+                            checked = st.checkbox(item['name'], value=bool(item['is_done']), key=f"chk_{item['id']}")
+                            if checked != bool(item['is_done']):
+                                update_item_status(item['id'], checked)
+                                st.rerun()
+
+                # B. マップ＆リンク形式（旅行・ドライブなど）
+                elif cat['type'] == 'maplist':
+                    # 地図データの準備
+                    map_data = items.dropna(subset=['lat', 'lon'])
+                    
+                    # 1. 地図表示（データがある場合のみ）
+                    if not map_data.empty:
+                        st.map(map_data, latitude='lat', longitude='lon', size=20, color='#FF0000')
+
+                    # 2. リスト表示
+                    for _, item in items.iterrows():
+                        with st.expander(f"📍 {item['name']} ({item['target_date'] or '日付未定'})"):
+                            st.write(f"日付: {item['target_date']}")
+                            if item['url']:
+                                st.link_button("公式サイトを見る", item['url'])
+                            
+                            # 削除ボタン
+                            if st.button("削除", key=f"del_item_{item['id']}"):
+                                delete_item(item['id'])
+                                st.rerun()
+
+                    # 3. 追加フォーム
+                    with st.expander("➕ 新しい行き先を追加"):
+                        with st.form(f"add_map_{cat['id']}", clear_on_submit=True):
+                            i_name = st.text_input("場所の名前 (例: 富良野ラベンダー畑)")
+                            i_date = st.date_input("予定日", datetime.date.today())
+                            i_url = st.text_input("URL (Googleマップなど)")
+                            
+                            c_lat, c_lon = st.columns(2)
+                            i_lat = c_lat.number_input("緯度 (Latitude)", value=None, format="%.6f", placeholder="例: 43.418")
+                            i_lon = c_lon.number_input("経度 (Longitude)", value=None, format="%.6f", placeholder="例: 142.427")
+                            
+                            st.caption("※緯度経度を入力すると地図にピンが立ちます")
+                            
+                            if st.form_submit_button("登録"):
+                                add_item(cat['id'], i_name, i_url, i_date, i_lat, i_lon)
+                                st.rerun()
